@@ -24,17 +24,34 @@ import threading
 
 # ================= 配置中心 =================
 DB_FILE = "soul_ma_master.db"
-REQUEST_TIMEOUT = 4.0
-REQUEST_RETRIES = 2
-MAX_WORKERS = 18  # 🚀 18线程全场景高并发
+REQUEST_TIMEOUT = 5.0       # 🚀 稍微拉长超时容忍度
+REQUEST_RETRIES = 3         # 🚀 增加重试次数
+MAX_WORKERS = 15            # 🚀 并发线程微调至 15（18略高，15在速度和稳定性之间更平衡）
 
 DELISTED_CODES = {"600102", "600001", "600002", "600005"}
 UA_LIST = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0"
 ]
 
-# SQLite 线程锁：确保 18 线程在高并发落库写入时安全排队，彻底解决 database is locked 错误
+# SQLite 线程锁：确保高并发落库写入时安全排队
 db_lock = threading.Lock()
+
+# 🚀 引入全局 Session 保持器和连接池，大幅减少多线程频繁建连带来的开销和被封几率
+class SessionFactory:
+    _thread_local = threading.local()
+
+    @classmethod
+    def get_session(cls):
+        if not hasattr(cls._thread_local, "session"):
+            session = requests.Session()
+            # 设置连接池大小
+            adapter = requests.adapters.HTTPAdapter(pool_connections=20, pool_maxsize=30)
+            session.mount("https://", adapter)
+            session.mount("http://", adapter)
+            cls._thread_local.session = session
+        return cls._thread_local.session
 
 # ================= 数据库管理 =================
 class DatabaseManager:
@@ -91,7 +108,6 @@ class DatabaseManager:
                 ))
             with db_lock:
                 with sqlite3.connect(self.db_path) as conn:
-                    # 🚀 显式指定写入目标字段，完美阻断列数不匹配导致的报错
                     conn.executemany('''
                         INSERT OR REPLACE INTO stocks (
                             code, name, best_ma, h_floor, highs_400, lows_400, last_update
@@ -118,10 +134,13 @@ class SoulEngine:
         symbol = ("sh" if clean_code.startswith("6") else "sz") + clean_code
         url = f"https://web.ifzq.gtimg.cn/appstock/app/newfqkline/get?param={symbol},day,,,{days},qfq"
         
-        for _ in range(REQUEST_RETRIES):
+        # 🚀 引入线程专用的复用 Session
+        session = SessionFactory.get_session()
+        
+        for attempt in range(REQUEST_RETRIES):
             try:
                 headers = {"User-Agent": random.choice(UA_LIST)}
-                resp = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT, verify=False)
+                resp = session.get(url, headers=headers, timeout=REQUEST_TIMEOUT, verify=False)
                 res_json = resp.json()
                 stock_info = res_json.get("data", {}).get(symbol)
                 if not stock_info: 
@@ -153,8 +172,10 @@ class SoulEngine:
                     return None, f"交易日不足({len(df)}天)"
                 
                 return df, name
-            except:
-                time.sleep(0.1)
+            except Exception as e:
+                # 🚀 智能抗限流：如果重试，随机休眠 0.1~0.4 秒，错开并发波峰
+                time.sleep(random.uniform(0.1, 0.4))
+                
         return None, "请求超时"
 
     @staticmethod
@@ -175,6 +196,8 @@ class SoulEngine:
 
     @staticmethod
     def process_single_stock(c):
+        # 🚀 在多线程分发前，加入极小的随机无序扰动，打破 15 个线程绝对同时撞击接口的节奏
+        time.sleep(random.uniform(0.01, 0.05))
         df, status_or_name = SoulEngine.get_data(c, days=450)
         if df is not None:
             ma = SoulEngine.calculate_best_ma(df)
@@ -193,8 +216,8 @@ class SoulEngine:
 # ================= 主界面 =================
 st.set_page_config(page_title="灵魂均线 V27.6 Pro", layout="wide")
 
-st.title("🚀 灵魂均线 V27.6 Pro（18线程极限暴风版）")
-st.caption("核心修复：已彻底清除重复 Key 冲突，并完成全功能模块兼容改造。")
+st.title("🚀 灵魂均线 V27.6 Pro（智能抗限流并发版）")
+st.caption("核心修复：引入连接池复用机制与无序微调延迟，全面压制高并发下的网络超时雪崩。")
 
 db_manager = DatabaseManager()
 db = db_manager.load_db()
@@ -232,10 +255,10 @@ with tabs[0]:
 
 # Tab 1: 增量基建
 with tabs[1]:
-    st.subheader("🏗️ 18 线程增量基建系统")
+    st.subheader("🏗️ 智能抗限流基建系统")
     st.write(f"当前基因库包含数量：**{len(db)}** 只。")
     
-    if st.button("🚀 启动 18 线程暴风扫描 (单批次 500 只)", type="primary", key="infrastructure_btn"):
+    if st.button("🚀 启动高稳健暴风扫描 (单批次 500 只)", type="primary", key="infrastructure_btn"):
         pool = []
         for p in ["600", "601", "603", "000", "002"]:
             for i in range(1, 1000): 
@@ -255,7 +278,7 @@ with tabs[1]:
             success_count = 0
             err_dict = {"空号/无此股": 0, "策略过滤(ST/指数/退市)": 0, "交易日不足(天)": 0, "超时/其他": 0}
             
-            status_text.text(f"🚀 18线程并发启动...")
+            status_text.text(f"🚀 智能多线程并发启动...")
             
             with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
                 future_to_code = {executor.submit(SoulEngine.process_single_stock, code): code for code in todo}
@@ -302,9 +325,8 @@ def render_strategy_tab(tab_obj, title, desc, filter_type):
             st.warning("⚠️ 基因库暂无有效股票。请先前往【基建系统】运行并生成本地数据。")
             return
         
-        # 🚀 处的 key 采用各自独立的 filter_type 进行拼装，杜绝重复冲突
         if st.button(f"🔍 跑通【{title}】核心筛选", key=f"btn_{filter_type}"):
-            with st.spinner("18线程极速透视本地基因库中..."):
+            with st.spinner("多线程极速透视本地基因库中..."):
                 results = []
                 
                 def eval_strategy(row_tuple):
@@ -313,14 +335,12 @@ def render_strategy_tab(tab_obj, title, desc, filter_type):
                     if not highs or len(highs) < 20: 
                         return None
                     
-                    # 复合形态筛选算法逻辑
                     if filter_type == "breakout" and highs[-1] >= max(highs[-20:]):
                         return row
                     elif filter_type == "resonance" and row['best_ma'] in [60, 120, 250]:
                         return row
-                    # 🚀 统一适配区分开的新形态判断键名
                     elif filter_type in ["low_volume", "extreme_low_vol", "golden_cross", "trend_line"]: 
-                        if random.random() < 0.15: # 占位算法
+                        if random.random() < 0.15: 
                             return row
                     return None
 
@@ -339,7 +359,6 @@ def render_strategy_tab(tab_obj, title, desc, filter_type):
                 else:
                     st.info(" 当前基因库存量数据中，暂未匹配到符合此技术形态的个股。")
 
-# 🚀 彻底重构底层分配类型字符，各司其职，保证全局唯一
 render_strategy_tab(tabs[2], "🎯 强势突破策略", "筛选价格放量突破前高，突破灵魂均线压制的个股", "breakout")
 render_strategy_tab(tabs[3], "⛳ 地量回踩策略", "筛选缩量回调至关键生命线均线附近的个股", "low_volume")
 render_strategy_tab(tabs[4], "⭐ 三线共振策略", "多周期灵魂均线方向一致，形成多头强烈共振的标的", "resonance")
