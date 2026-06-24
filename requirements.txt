@@ -6,3 +6,8 @@ plotly
 openpyxl
 xlsxwriter
 pysqlite3-binary
+streamlit
+pandas
+numpy
+akshare
+pysqlite3-binary
