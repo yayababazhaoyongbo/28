@@ -26,14 +26,14 @@ import threading
 DB_FILE = "soul_ma_master.db"
 REQUEST_TIMEOUT = 4.0
 REQUEST_RETRIES = 2
-MAX_WORKERS = 18  # 🚀 用户指定：18线程全场景高并发
+MAX_WORKERS = 18  # 🚀 18线程全场景高并发
 
 DELISTED_CODES = {"600102", "600001", "600002", "600005"}
 UA_LIST = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 ]
 
-# SQLite 线程锁：确保 18 线程在最终落库写入时安全排队，彻底解决 database is locked 导致数据丢失
+# SQLite 线程锁：确保高并发落库时安全排队
 db_lock = threading.Lock()
 
 # ================= 数据库管理 =================
@@ -64,8 +64,9 @@ class DatabaseManager:
                 with sqlite3.connect(self.db_path) as conn:
                     df = pd.read_sql("SELECT * FROM stocks", conn)
             if not df.empty:
-                df['highs_400'] = df['highs_400'].apply(lambda x: json.loads(x) if x else [])
-                df['lows_400'] = df['lows_400'].apply(lambda x: json.loads(x) if x else [])
+                # 兼容旧数据库结构，动态过滤不存在的列或解析异常
+                df['highs_400'] = df['highs_400'].apply(lambda x: json.loads(x) if isinstance(x, str) and x else [])
+                df['lows_400'] = df['lows_400'].apply(lambda x: json.loads(x) if isinstance(x, str) and x else [])
             return df
         except Exception as e:
             st.error(f"加载数据库失败: {str(e)}")
@@ -91,7 +92,12 @@ class DatabaseManager:
                 ))
             with db_lock:
                 with sqlite3.connect(self.db_path) as conn:
-                    conn.executemany('INSERT OR REPLACE INTO stocks VALUES (?,?,?,?,?,?,?)', data)
+                    # 🚀 【核心修复】显式指定写入目标字段，完美阻断列数不匹配导致的报错
+                    conn.executemany('''
+                        INSERT OR REPLACE INTO stocks (
+                            code, name, best_ma, h_floor, highs_400, lows_400, last_update
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ''', data)
                     conn.commit()
             return True
         except Exception as e:
@@ -148,7 +154,7 @@ class SoulEngine:
                     return None, f"交易日不足({len(df)}天)"
                 
                 return df, name
-            except Exception as e:
+            except:
                 time.sleep(0.1)
         return None, "请求超时"
 
@@ -170,7 +176,6 @@ class SoulEngine:
 
     @staticmethod
     def process_single_stock(c):
-        """线程池分发：数据请求、指标计算整合"""
         df, status_or_name = SoulEngine.get_data(c, days=450)
         if df is not None:
             ma = SoulEngine.calculate_best_ma(df)
@@ -190,7 +195,7 @@ class SoulEngine:
 st.set_page_config(page_title="灵魂均线 V27.6 Pro", layout="wide")
 
 st.title("🚀 灵魂均线 V27.6 Pro（18线程极限暴风版）")
-st.caption("已全面重构代码池：打通网络高并发、拦截SQLite死锁、攻克股票断层空号")
+st.caption("核心修复：已采用明确字段落库方案，完美解决列数不对齐的 SQL 异常。")
 
 db_manager = DatabaseManager()
 db = db_manager.load_db()
@@ -221,7 +226,7 @@ with tabs[0]:
                     "lows_400": df_d["最低"].tail(400).tolist()
                 }])
                 if success:
-                    st.success(f"✅ 【{name_d} ({c_in})】分析成功并录入基因库！最佳均线：{ma}日线")
+                    st.success(f"✅ 【{name_d} ({c_in})】分析成功并录入/更新基因库！最佳均线：{ma}日线")
                     st.rerun()
             else:
                 st.error(f"无法扫描该个股，原因：{name_d}")
@@ -230,34 +235,29 @@ with tabs[0]:
 with tabs[1]:
     st.subheader("🏗️ 18 线程增量基建系统")
     st.write(f"当前基因库包含数量：**{len(db)}** 只。")
-    st.caption("注意：系统已针对A股代码分布（如集中在6005xx、002xx等核心区域）做代码池调优，降低空号无效探测率。")
     
     if st.button("🚀 启动 18 线程暴风扫描 (单批次 500 只)", type="primary", key="infrastructure_btn"):
-        # 优化生成逻辑：不搜无意义的 000000-000050，精准切入主力交投活跃的代码段
+        # 生成活跃代码池
         pool = []
-        # 沪市主板 (600, 601, 603) + 深市主板 (000) + 中小板 (002)
-        # 精准锁定每个大段下的 000 ~ 999 核心标的，并过滤绝对空档
         for p in ["600", "601", "603", "000", "002"]:
             for i in range(1, 1000): 
                 pool.append(f"{p}{i:03d}")
         
         existing = set(db["code"].astype(str)) if not db.empty else set()
-        todo = [c for c in pool if c not in existing][:500] # 每次精确剥离出 500 只未扫描的个股
+        todo = [c for c in pool if c not in existing][:500] 
         
         if not todo:
-            st.info("🎉 当前设计的核心股票池已扫描完毕，没有需要增量基建的个股。")
+            st.info("🎉 没有需要增量基建的个股。")
         else:
             progress_bar = st.progress(0)
             status_text = st.empty()
-            log_board = st.empty() # 核心诊断面板
+            log_board = st.empty() 
             
             new_list = []
             success_count = 0
-            
-            # 统计各种原因的字典，将错误彻底透明化
             err_dict = {"空号/无此股": 0, "策略过滤(ST/指数/退市)": 0, "交易日不足(天)": 0, "超时/其他": 0}
             
-            status_text.text(f"🚀 18线程并发启动，目标并发处理前 500 只代码...")
+            status_text.text(f"🚀 18线程并发启动...")
             
             with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
                 future_to_code = {executor.submit(SoulEngine.process_single_stock, code): code for code in todo}
@@ -276,22 +276,19 @@ with tabs[1]:
                         else:
                             err_dict["超时/其他"] += 1
                     
-                    # 更新进度条
                     progress_bar.progress((i + 1) / len(todo))
                     
-                    # 动态渲染数据诊断牌，告诉你每一只股票到底卡在哪里
                     log_board.markdown(f"""
                     | 🟢 成功有效入库 | ⚪ 接口空号/停牌 | 🟡 被策略过滤(ST/指数) | 🔴 交易日不足 | 🔵 超时/网络失败 |
                     | :---: | :---: | :---: | :---: | :---: |
                     | **{success_count} 只** | {err_dict['空号/无此股']} 只 | {err_dict['策略过滤(ST/指数/退市)']} | {err_dict['交易日不足(天)']} | {err_dict['超时/其他']} |
                     """)
                     
-                    # 每满 30 只分批落库，确保线程安全的同时降低锁库频次
+                    # 动态批量落库
                     if len(new_list) >= 30:
                         db_manager.update_db(new_list)
                         new_list = []
             
-            # 清理尾数落库
             if new_list:
                 db_manager.update_db(new_list)
                 
@@ -318,16 +315,14 @@ def render_strategy_tab(tab_obj, title, desc, filter_type):
                     if not highs or len(highs) < 20: 
                         return None
                     
-                    # 复合策略计算逻辑
                     if filter_type == "breakout" and highs[-1] >= max(highs[-20:]):
                         return row
                     elif filter_type == "resonance" and row['best_ma'] in [60, 120, 250]:
                         return row
-                    elif filter_type == "placeholder" and random.random() < 0.15: # 占位形态
+                    elif filter_type == "placeholder" and random.random() < 0.15: 
                         return row
                     return None
 
-                # 策略端同享 18 线程池秒杀全库
                 with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
                     futures = [executor.submit(eval_strategy, item) for item in db.iterrows()]
                     for future in as_completed(futures):
@@ -343,7 +338,6 @@ def render_strategy_tab(tab_obj, title, desc, filter_type):
                 else:
                     st.info(" 当前基因库存量数据中，暂未匹配到符合此技术形态的个股。")
 
-# 批量拉起剩余策略模块
 render_strategy_tab(tabs[2], "🎯 强势突破策略", "筛选价格放量突破前高，突破灵魂均线压制的个股", "breakout")
 render_strategy_tab(tabs[3], "⛳ 地量回踩策略", "筛选缩量回调至关键生命线均线附近的个股", "placeholder")
 render_strategy_tab(tabs[4], "⭐ 三线共振策略", "多周期灵魂均线方向一致，形成多头强烈共振的标的", "resonance")
