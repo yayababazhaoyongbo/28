@@ -174,7 +174,7 @@ class SoulEngine:
 # ================= 主界面 =================
 st.set_page_config(page_title="灵魂均线 V28.0", layout="wide")
 st.title("🚀 灵魂均线 V28.0（Akshare 稳定版）")
-st.caption("✅ 数据源正常，可开始基建")
+st.caption("✅ 数据源已就绪")
 
 db_manager = DatabaseManager()
 db = db_manager.load_db()
@@ -261,7 +261,7 @@ def render_strategy_tab(tab_obj, title, desc, filter_type):
         st.subheader(title)
         st.caption(desc)
         if len(db) == 0:
-            st.warning("请先运行基建系统建立基因库")
+            st.warning("请先运行基建系统")
             return
         if st.button(f"🔍 运行{title}筛选", key=filter_type):
             with st.spinner("筛选中..."):
@@ -291,7 +291,6 @@ def render_strategy_tab(tab_obj, title, desc, filter_type):
                 else:
                     st.info("暂无匹配")
 
-# 注册各策略 Tab
 for tab, (title, desc, ftype) in zip(tabs[2:], [
     ("🎯 强势突破策略", "最新价突破近20日高点", "breakout"),
     ("⛳ 地量回踩策略", "缩量回调至生命线", "low_volume"),
@@ -302,4 +301,4 @@ for tab, (title, desc, ftype) in zip(tabs[2:], [
 ]):
     render_strategy_tab(tab, title, desc, ftype)
 
-st.sidebar.success("✅ Akshare 数据源就绪")
+st.sidebar.success("✅ 系统就绪，可开始扫描")
