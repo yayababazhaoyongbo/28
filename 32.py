@@ -24,9 +24,9 @@ import threading
 
 # ================= 配置中心 =================
 DB_FILE = "soul_ma_master.db"
-REQUEST_TIMEOUT = 5.0       # 🚀 稍微拉长超时容忍度
-REQUEST_RETRIES = 3         # 🚀 增加重试次数
-MAX_WORKERS = 15            # 🚀 并发线程微调至 15（18略高，15在速度和稳定性之间更平衡）
+REQUEST_TIMEOUT = 5.0       
+REQUEST_RETRIES = 3         
+MAX_WORKERS = 15            # 🚀 用户指定：精准调整为 15 线程并发
 
 DELISTED_CODES = {"600102", "600001", "600002", "600005"}
 UA_LIST = [
@@ -38,7 +38,7 @@ UA_LIST = [
 # SQLite 线程锁：确保高并发落库写入时安全排队
 db_lock = threading.Lock()
 
-# 🚀 引入全局 Session 保持器和连接池，大幅减少多线程频繁建连带来的开销和被封几率
+# 线程专用复用 Session 连接池
 class SessionFactory:
     _thread_local = threading.local()
 
@@ -46,7 +46,6 @@ class SessionFactory:
     def get_session(cls):
         if not hasattr(cls._thread_local, "session"):
             session = requests.Session()
-            # 设置连接池大小
             adapter = requests.adapters.HTTPAdapter(pool_connections=20, pool_maxsize=30)
             session.mount("https://", adapter)
             session.mount("http://", adapter)
@@ -134,7 +133,6 @@ class SoulEngine:
         symbol = ("sh" if clean_code.startswith("6") else "sz") + clean_code
         url = f"https://web.ifzq.gtimg.cn/appstock/app/newfqkline/get?param={symbol},day,,,{days},qfq"
         
-        # 🚀 引入线程专用的复用 Session
         session = SessionFactory.get_session()
         
         for attempt in range(REQUEST_RETRIES):
@@ -172,8 +170,7 @@ class SoulEngine:
                     return None, f"交易日不足({len(df)}天)"
                 
                 return df, name
-            except Exception as e:
-                # 🚀 智能抗限流：如果重试，随机休眠 0.1~0.4 秒，错开并发波峰
+            except:
                 time.sleep(random.uniform(0.1, 0.4))
                 
         return None, "请求超时"
@@ -196,7 +193,6 @@ class SoulEngine:
 
     @staticmethod
     def process_single_stock(c):
-        # 🚀 在多线程分发前，加入极小的随机无序扰动，打破 15 个线程绝对同时撞击接口的节奏
         time.sleep(random.uniform(0.01, 0.05))
         df, status_or_name = SoulEngine.get_data(c, days=450)
         if df is not None:
@@ -216,8 +212,8 @@ class SoulEngine:
 # ================= 主界面 =================
 st.set_page_config(page_title="灵魂均线 V27.6 Pro", layout="wide")
 
-st.title("🚀 灵魂均线 V27.6 Pro（智能抗限流并发版）")
-st.caption("核心修复：引入连接池复用机制与无序微调延迟，全面压制高并发下的网络超时雪崩。")
+st.title("🚀 灵魂均线 V27.6 Pro（15 线程稳健并发版）")
+st.caption("当前线程配置：15 | 继承了连接池复用机制与无序微调延迟，全面压制网络超时雪崩。")
 
 db_manager = DatabaseManager()
 db = db_manager.load_db()
@@ -278,7 +274,7 @@ with tabs[1]:
             success_count = 0
             err_dict = {"空号/无此股": 0, "策略过滤(ST/指数/退市)": 0, "交易日不足(天)": 0, "超时/其他": 0}
             
-            status_text.text(f"🚀 智能多线程并发启动...")
+            status_text.text(f"🚀 15 线程并发启动...")
             
             with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
                 future_to_code = {executor.submit(SoulEngine.process_single_stock, code): code for code in todo}
@@ -351,8 +347,8 @@ def render_strategy_tab(tab_obj, title, desc, filter_type):
                         if res is not None:
                             results.append(res)
 
-                if results:
-                    res_df = pd.DataFrame(results)[["code", "name", "best_ma", "h_floor", "last_update"]]
+                if Urban_results := results:
+                    res_df = pd.DataFrame(Urban_results)[["code", "name", "best_ma", "h_floor", "last_update"]]
                     res_df.columns = ["股票代码", "股票名称", "灵魂均线", "核心价值底", "扫描更新时间"]
                     st.dataframe(res_df, use_container_width=True)
                     st.success(f"🎯 形态匹配完毕：全库共筛选出 {len(res_df)} 只符合当前因子的个股。")
