@@ -18,24 +18,25 @@ import io
 import json
 import sqlite3
 import time                     
+import os
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 
 # ================= 配置中心 =================
 DB_FILE = "soul_ma_master.db"
+CSV_SEED_FILE = "soul_ma_master_db.csv"  # 🚀 初始基因库CSV文件名
 REQUEST_TIMEOUT = 5.0       
 REQUEST_RETRIES = 3         
-MAX_WORKERS = 15            # 🚀 用户指定：精准调整为 15 线程并发
+MAX_WORKERS = 15            # 15 线程稳健并发
 
 DELISTED_CODES = {"600102", "600001", "600002", "600005"}
 UA_LIST = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0"
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
 ]
 
-# SQLite 线程锁：确保高并发落库写入时安全排队
+# SQLite 线程锁：确保高并发安全
 db_lock = threading.Lock()
 
 # 线程专用复用 Session 连接池
@@ -57,6 +58,7 @@ class DatabaseManager:
     def __init__(self, db_path=DB_FILE):
         self.db_path = db_path
         self._init_db()
+        self.seed_db_from_csv()  # 🚀 核心新增：启动时自动检测并合并外部 CSV 库
 
     def _init_db(self):
         with db_lock:
@@ -73,6 +75,25 @@ class DatabaseManager:
                     )
                 ''')
                 conn.commit()
+
+    def seed_db_from_csv(self):
+        """🚀 自动装载补充包：如果数据库为空，秒级合并 CSV 数据入库"""
+        if os.path.exists(CSV_SEED_FILE):
+            try:
+                with db_lock:
+                    with sqlite3.connect(self.db_path) as conn:
+                        cursor = conn.cursor()
+                        cursor.execute("SELECT COUNT(*) FROM stocks")
+                        count = cursor.fetchone()[0]
+                
+                # 如果数据库里是空的（比如首次运行或云端重置了），自动把 3083 条数据灌进去
+                if count == 0:
+                    df_csv = pd.read_csv(CSV_SEED_FILE)
+                    new_rows = df_csv.to_dict('records')
+                    self.update_db(new_rows)
+                    st.sidebar.success(f"🎉 已成功自动合并 {len(df_csv)} 只基础股票基因！")
+            except Exception as e:
+                st.sidebar.warning(f"自动合并初始库提示: {str(e)}")
 
     def load_db(self):
         try:
@@ -213,7 +234,7 @@ class SoulEngine:
 st.set_page_config(page_title="灵魂均线 V27.6 Pro", layout="wide")
 
 st.title("🚀 灵魂均线 V27.6 Pro（15 线程稳健并发版）")
-st.caption("当前线程配置：15 | 继承了连接池复用机制与无序微调延迟，全面压制网络超时雪崩。")
+st.caption("基因自动预装版：启动时自动侦测合并绑定的 CSV 离线库，无需反复从零基建。")
 
 db_manager = DatabaseManager()
 db = db_manager.load_db()
@@ -347,11 +368,11 @@ def render_strategy_tab(tab_obj, title, desc, filter_type):
                         if res is not None:
                             results.append(res)
 
-                if Urban_results := results:
-                    res_df = pd.DataFrame(Urban_results)[["code", "name", "best_ma", "h_floor", "last_update"]]
+                if results:
+                    res_df = pd.DataFrame(results)[["code", "name", "best_ma", "h_floor", "last_update"]]
                     res_df.columns = ["股票代码", "股票名称", "灵魂均线", "核心价值底", "扫描更新时间"]
                     st.dataframe(res_df, use_container_width=True)
-                    st.success(f"🎯 形态匹配完毕：全库共筛选出 {len(res_df)} 只符合当前因子的个股。")
+                    st.success(f"🎯 形态匹配完毕：全库共筛选出 {len(results)} 只符合当前因子的个股。")
                 else:
                     st.info(" 当前基因库存量数据中，暂未匹配到符合此技术形态的个股。")
 
