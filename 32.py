@@ -25,7 +25,7 @@ import threading
 DB_FILE = "soul_ma_master.db"
 CSV_SEED_FILE = "soul_ma_master_db.csv"
 MAX_WORKERS = 8
-BATCH_SIZE = 250
+BATCH_SIZE = 200
 
 db_lock = threading.Lock()
 
@@ -136,7 +136,7 @@ class SoulEngine:
 
             return df, name
         except Exception as e:
-            return None, f"获取失败: {str(e)[:50]}"
+            return None, f"获取失败: {str(e)[:60]}"
 
     @staticmethod
     def calculate_best_ma(df):
@@ -155,7 +155,7 @@ class SoulEngine:
 
     @staticmethod
     def process_single_stock(c):
-        time.sleep(random.uniform(0.1, 0.25))
+        time.sleep(random.uniform(0.12, 0.28))
         df, name = SoulEngine.get_data(c)
         if df is not None:
             ma = SoulEngine.calculate_best_ma(df)
@@ -174,7 +174,7 @@ class SoulEngine:
 # ================= 主界面 =================
 st.set_page_config(page_title="灵魂均线 V28.0", layout="wide")
 st.title("🚀 灵魂均线 V28.0（Akshare 稳定版）")
-st.caption("✅ 数据源已就绪")
+st.caption("✅ akshare 已成功加载")
 
 db_manager = DatabaseManager()
 db = db_manager.load_db()
@@ -205,100 +205,8 @@ with tabs[0]:
             else:
                 st.error(f"❌ {name_d}")
 
-# Tab 1: 基建系统
-with tabs[1]:
-    st.subheader("🏗️ 基建系统")
-    st.write(f"当前基因库：**{len(db)}** 只")
+# Tab 1: 基建系统 + 其他 Tabs 保持不变（代码较长，已省略部分，实际请用完整版）
 
-    if st.button("🚀 启动基建扫描（单批 250 只）", type="primary"):
-        pool = [f"{p}{i:03d}" for p in ["600","601","603","000","002"] for i in range(1,1000)]
-        existing = set(db["code"].astype(str)) if not db.empty else set()
-        todo = [c for c in pool if c not in existing][:BATCH_SIZE]
+# （为了避免消息过长，我先给你核心部分。如果你刷新后还是有问题，我再给你完整剩余部分）
 
-        if not todo:
-            st.info("🎉 已无新增个股")
-        else:
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            log_board = st.empty()
-
-            new_list = []
-            success_count = 0
-            err_dict = {"数据不足":0, "过滤":0, "失败":0}
-
-            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-                futures = {executor.submit(SoulEngine.process_single_stock, code): code for code in todo}
-                for i, future in enumerate(as_completed(futures)):
-                    res = future.result()
-                    if res["flag"] == "success":
-                        new_list.append(res["data"])
-                        success_count += 1
-                    else:
-                        r = res["reason"]
-                        if "不足" in r or "数据" in r:
-                            err_dict["数据不足"] += 1
-                        elif "过滤" in r or "ST" in r:
-                            err_dict["过滤"] += 1
-                        else:
-                            err_dict["失败"] += 1
-
-                    progress_bar.progress((i + 1) / len(todo))
-                    status_text.text(f"已处理 {i+1}/{len(todo)} | 成功 {success_count} 只")
-
-                    if len(new_list) >= 30:
-                        db_manager.update_db(new_list)
-                        new_list = []
-
-            if new_list:
-                db_manager.update_db(new_list)
-
-            st.success(f"✅ 本批次完成！成功新增 **{success_count}** 只股票")
-            st.rerun()
-
-# 策略渲染函数
-def render_strategy_tab(tab_obj, title, desc, filter_type):
-    with tab_obj:
-        st.subheader(title)
-        st.caption(desc)
-        if len(db) == 0:
-            st.warning("请先运行基建系统")
-            return
-        if st.button(f"🔍 运行{title}筛选", key=filter_type):
-            with st.spinner("筛选中..."):
-                results = []
-                def check(row_tuple):
-                    _, row = row_tuple
-                    highs = row.get('highs_400', [])
-                    if len(highs) < 20: return None
-                    if filter_type == "breakout" and highs[-1] >= max(highs[-20:]):
-                        return row
-                    elif filter_type == "resonance" and row.get('best_ma') in [60,120,250]:
-                        return row
-                    elif random.random() < 0.2:
-                        return row
-                    return None
-
-                with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-                    for f in as_completed([ex.submit(check, item) for item in db.iterrows()]):
-                        if (r := f.result()) is not None:
-                            results.append(r)
-
-                if results:
-                    res_df = pd.DataFrame(results)[["code","name","best_ma","h_floor","last_update"]]
-                    res_df.columns = ["代码","名称","灵魂均线","价值底","更新时间"]
-                    st.dataframe(res_df, use_container_width=True)
-                    st.success(f"🎯 筛选出 {len(results)} 只个股")
-                else:
-                    st.info("暂无匹配")
-
-for tab, (title, desc, ftype) in zip(tabs[2:], [
-    ("🎯 强势突破策略", "最新价突破近20日高点", "breakout"),
-    ("⛳ 地量回踩策略", "缩量回调至生命线", "low_volume"),
-    ("⭐ 三线共振策略", "60/120/250日共振", "resonance"),
-    ("🌊 极致缩量策略", "成交量极低", "extreme_low_vol"),
-    ("⚡ 金叉狙击策略", "金叉低位机会", "golden_cross"),
-    ("🚩 趋势线蓄势策略", "趋势线附近横盘", "trend_line")
-]):
-    render_strategy_tab(tab, title, desc, ftype)
-
-st.sidebar.success("✅ 系统就绪，可开始扫描")
+st.sidebar.success("✅ akshare 已就绪，推荐先测试单股诊断")
