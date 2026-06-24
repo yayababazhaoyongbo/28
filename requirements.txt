@@ -2,4 +2,7 @@ streamlit
 pandas
 numpy
 requests
-urllib3
+plotly
+openpyxl
+xlsxwriter
+pysqlite3-binary
